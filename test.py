@@ -33,6 +33,7 @@ from models.modelAS import *
 from models.models import *
 
 from models.mt5 import *
+from models.model_mamba_ssm import *
 
 torch.cuda.empty_cache()
 
@@ -273,6 +274,20 @@ if __name__ == "__main__":
     
     elif args.model == 'Model_Dense':
         trainer.setting.network = Model_Den(in_ch=9, out_ch=1,
+                  list_ch_A=[-1, 16, 32, 64, 128, 256],
+                  list_ch_B=[-1, 32, 64, 128, 256, 512],
+                  d_state=16, d_conv=4, expand=2, channel_token=False)
+
+    elif args.model == 'Model_RANDose_MambaA':
+    # Strategy A: F_out = CSA(Mamba(MSFE(F_in)))  — sequential integration
+        trainer.setting.network = Model_RANDose_MambaA(in_ch=9, out_ch=1,
+                  list_ch_A=[-1, 16, 32, 64, 128, 256],
+                  list_ch_B=[-1, 32, 64, 128, 256, 512],
+                  d_state=16, d_conv=4, expand=2, channel_token=False)
+
+    elif args.model == 'Model_RANDose_MambaB':
+        # Strategy B: F_out = CSA(MSFE(F_in)) + γ·Mamba(MSFE(F_in))  — parallel integration
+        trainer.setting.network = Model_RANDose_MambaB(in_ch=9, out_ch=1,
                   list_ch_A=[-1, 16, 32, 64, 128, 256],
                   list_ch_B=[-1, 32, 64, 128, 256, 512],
                   d_state=16, d_conv=4, expand=2, channel_token=False)
