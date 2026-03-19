@@ -1,0 +1,172 @@
+import os
+import numpy as np
+import SimpleITK as sitk
+
+from utils.e_metrics import get_3D_Dose_dif, get_DVH_metrics
+
+
+def get_patient_level_dose_and_dvh_scores(prediction_dir, gt_dir, list_patient_ids):
+    """
+    Compute patient-level Dose Score and DVH Score.
+
+    Returns
+    -------
+    patient_dose_scores : np.ndarray
+        Shape (N,), one Dose Score per patient.
+    patient_dvh_scores : np.ndarray
+        Shape (N,), one DVH Score per patient.
+    detailed_dvh_errors : dict
+        Per-metric absolute errors pooled across all patients/structures.
+    """
+    structure_names = [
+        'Brainstem',
+        'SpinalCord',
+        'RightParotid',
+        'LeftParotid',
+        'Esophagus',
+        'Larynx',
+        'Mandible',
+        'PTV70',
+        'PTV63',
+        'PTV56'
+    ]
+
+    patient_dose_scores = []
+    patient_dvh_scores = []
+
+    detailed_dvh_errors = {
+        'D1': [],
+        'D95': [],
+        'D99': [],
+        'D_0.1_cc': [],
+        'mean': []
+    }
+
+    for patient_id in list_patient_ids:
+        pred_path = os.path.join(prediction_dir, patient_id, 'dose.nii.gz')
+        gt_path = os.path.join(gt_dir, patient_id, 'dose.nii.gz')
+        mask_path = os.path.join(gt_dir, patient_id, 'possible_dose_mask.nii.gz')
+
+        pred_nii = sitk.ReadImage(pred_path)
+        pred = sitk.GetArrayFromImage(pred_nii)
+
+        gt_nii = sitk.ReadImage(gt_path)
+        gt = sitk.GetArrayFromImage(gt_nii)
+
+        possible_dose_mask_nii = sitk.ReadImage(mask_path)
+        possible_dose_mask = sitk.GetArrayFromImage(possible_dose_mask_nii)
+
+        # -------------------------
+        # Dose score for this patient
+        # -------------------------
+        patient_dose = get_3D_Dose_dif(pred, gt, possible_dose_mask)
+        patient_dose_scores.append(patient_dose)
+
+        # -------------------------
+        # DVH score for this patient
+        # -------------------------
+        patient_dvh_metric_diffs = []
+
+        for structure_name in structure_names:
+            structure_file = os.path.join(gt_dir, patient_id, f'{structure_name}.nii.gz')
+
+            if os.path.exists(structure_file):
+                structure_nii = sitk.ReadImage(structure_file, sitk.sitkUInt8)
+                structure = sitk.GetArrayFromImage(structure_nii)
+                spacing = structure_nii.GetSpacing()
+
+                mode = 'target' if 'PTV' in structure_name else 'OAR'
+
+                pred_DVH = get_DVH_metrics(pred, structure, mode=mode, spacing=spacing)
+                gt_DVH = get_DVH_metrics(gt, structure, mode=mode, spacing=spacing)
+
+                for metric in gt_DVH.keys():
+                    diff = abs(gt_DVH[metric] - pred_DVH[metric])
+                    patient_dvh_metric_diffs.append(diff)
+
+                    if metric in detailed_dvh_errors:
+                        detailed_dvh_errors[metric].append(diff)
+                    else:
+                        detailed_dvh_errors[metric] = [diff]
+
+        if len(patient_dvh_metric_diffs) > 0:
+            patient_dvh_scores.append(np.mean(patient_dvh_metric_diffs))
+        else:
+            patient_dvh_scores.append(np.nan)
+
+    patient_dose_scores = np.array(patient_dose_scores, dtype=np.float64)
+    patient_dvh_scores = np.array(patient_dvh_scores, dtype=np.float64)
+
+    return patient_dose_scores, patient_dvh_scores, detailed_dvh_errors
+
+
+def summarize_scores(patient_dose_scores, patient_dvh_scores):
+    """
+    Compute mean ± std from patient-level scores.
+    Uses sample std (ddof=1).
+    """
+    patient_dose_scores = np.asarray(patient_dose_scores, dtype=np.float64)
+    patient_dvh_scores = np.asarray(patient_dvh_scores, dtype=np.float64)
+
+    patient_dose_scores = patient_dose_scores[~np.isnan(patient_dose_scores)]
+    patient_dvh_scores = patient_dvh_scores[~np.isnan(patient_dvh_scores)]
+
+    summary = {
+        'dose_mean': np.mean(patient_dose_scores),
+        'dose_std': np.std(patient_dose_scores, ddof=1),
+        'dvh_mean': np.mean(patient_dvh_scores),
+        'dvh_std': np.std(patient_dvh_scores, ddof=1),
+        'n_dose': len(patient_dose_scores),
+        'n_dvh': len(patient_dvh_scores),
+    }
+    return summary
+
+
+def evaluate_prediction_dir_with_std(prediction_dir, gt_dir, list_patient_ids, save_csv=False, output_dir=None):
+    """
+    Full helper:
+    1. Compute patient-level Dose and DVH scores
+    2. Compute mean ± std
+    3. Optionally save patient-level CSV files
+
+    Returns
+    -------
+    summary : dict
+    patient_dose_scores : np.ndarray
+    patient_dvh_scores : np.ndarray
+    detailed_dvh_errors : dict
+    """
+    patient_dose_scores, patient_dvh_scores, detailed_dvh_errors = get_patient_level_dose_and_dvh_scores(
+        prediction_dir=prediction_dir,
+        gt_dir=gt_dir,
+        list_patient_ids=list_patient_ids
+    )
+
+    summary = summarize_scores(patient_dose_scores, patient_dvh_scores)
+
+    if save_csv:
+        if output_dir is None:
+            output_dir = prediction_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        dose_csv = os.path.join(output_dir, 'patient_dose_scores.csv')
+        dvh_csv = os.path.join(output_dir, 'patient_dvh_scores.csv')
+
+        with open(dose_csv, 'w') as f:
+            f.write('patient_id,dose_score\n')
+            for pid, score in zip(list_patient_ids, patient_dose_scores):
+                f.write(f'{pid},{score:.6f}\n')
+
+        with open(dvh_csv, 'w') as f:
+            f.write('patient_id,dvh_score\n')
+            for pid, score in zip(list_patient_ids, patient_dvh_scores):
+                f.write(f'{pid},{score:.6f}\n')
+
+    return summary, patient_dose_scores, patient_dvh_scores, detailed_dvh_errors
+
+
+def print_metric_summary(model_name, summary):
+    print(f'\n{model_name}')
+    print(f"Dose Score: {summary['dose_mean']:.4f} ± {summary['dose_std']:.4f}")
+    print(f"DVH Score : {summary['dvh_mean']:.4f} ± {summary['dvh_std']:.4f}")
+    print(f"N patients : Dose={summary['n_dose']}, DVH={summary['n_dvh']}")
