@@ -96,72 +96,69 @@ class Comb(nn.Module):
         super(Comb, self).__init__()
 
         self.in_channels = in_channels
-        self.out_channels = out_channels  # Default is 1 (single-channel output)
+        self.out_channels = out_channels
 
-        # Multi-scale feature extraction
-        self.conv_3x3 = nn.Conv3d(in_channels, in_channels, kernel_size=3, padding=1)
-        self.conv_5x5 = nn.Conv3d(in_channels, in_channels, kernel_size=5, padding=2)
-        self.conv_7x7 = nn.Conv3d(in_channels, in_channels, kernel_size=7, padding=3)
+        # Separate multi-scale conv branches for encoder features
+        self.enc_conv_3x3 = nn.Conv3d(in_channels, in_channels, kernel_size=3, padding=1)
+        self.enc_conv_5x5 = nn.Conv3d(in_channels, in_channels, kernel_size=5, padding=2)
+        self.enc_conv_7x7 = nn.Conv3d(in_channels, in_channels, kernel_size=7, padding=3)
 
-        # Attention Mechanism (Scale-Specific Attention)
-        self.att_3x3 = nn.Conv3d(in_channels, in_channels, kernel_size=1)
-        self.att_5x5 = nn.Conv3d(in_channels, in_channels, kernel_size=1)
-        self.att_7x7 = nn.Conv3d(in_channels, in_channels, kernel_size=1)
+        # Separate multi-scale conv branches for PTV features
+        self.ptv_conv_3x3 = nn.Conv3d(in_channels, in_channels, kernel_size=3, padding=1)
+        self.ptv_conv_5x5 = nn.Conv3d(in_channels, in_channels, kernel_size=5, padding=2)
+        self.ptv_conv_7x7 = nn.Conv3d(in_channels, in_channels, kernel_size=7, padding=3)
 
-        # Final Attention for Fused Features
+        # Spatial attention per scale (applied separately to enc and ptv)
+        self.att_enc_3x3 = nn.Conv3d(in_channels, in_channels, kernel_size=1)
+        self.att_enc_5x5 = nn.Conv3d(in_channels, in_channels, kernel_size=1)
+        self.att_enc_7x7 = nn.Conv3d(in_channels, in_channels, kernel_size=1)
+
+        self.att_ptv_3x3 = nn.Conv3d(in_channels, in_channels, kernel_size=1)
+        self.att_ptv_5x5 = nn.Conv3d(in_channels, in_channels, kernel_size=1)
+        self.att_ptv_7x7 = nn.Conv3d(in_channels, in_channels, kernel_size=1)
+
+        # Final attention over fused features
         self.att_fusion = nn.Conv3d(in_channels, 1, kernel_size=1)
 
-        # If PTV has only 1 channel, expand it to match in_channels
+        # Expand PTV from 1 channel to in_channels
         self.channel_expand = nn.Conv3d(1, in_channels, kernel_size=1)
 
-        # Output layer (allows either single or multi-channel output)
         self.final_out = nn.Conv3d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, enc_out, ptv):
         """
-        enc_out: Tensor of shape [B, in_channels, D, H, W]
-        ptv: Tensor of shape [B, 1, D, H, W]
+        enc_out: [B, in_channels, D, H, W]
+        ptv:     [B, 1, D, H, W]
         """
-        # Resize ptv to match encoder output spatial dimensions
         ptv_resized = F.interpolate(ptv, size=enc_out.shape[2:], mode='trilinear', align_corners=False)
-
-        # Ensure ptv has matching channels if needed
         if ptv_resized.shape[1] != enc_out.shape[1]:
             ptv_resized = self.channel_expand(ptv_resized)
 
-        # Multi-Scale Feature Extraction
-        x_3x3 = F.relu(self.conv_3x3(enc_out))
-        x_5x5 = F.relu(self.conv_5x5(enc_out))
-        x_7x7 = F.relu(self.conv_7x7(enc_out))
+        # Independent multi-scale extraction for encoder and PTV
+        x_3 = F.relu(self.enc_conv_3x3(enc_out))
+        x_5 = F.relu(self.enc_conv_5x5(enc_out))
+        x_7 = F.relu(self.enc_conv_7x7(enc_out))
 
-        PTV_3x3 = F.relu(self.conv_3x3(ptv_resized))
-        PTV_5x5 = F.relu(self.conv_5x5(ptv_resized))
-        PTV_7x7 = F.relu(self.conv_7x7(ptv_resized))
+        p_3 = F.relu(self.ptv_conv_3x3(ptv_resized))
+        p_5 = F.relu(self.ptv_conv_5x5(ptv_resized))
+        p_7 = F.relu(self.ptv_conv_7x7(ptv_resized))
 
-        # Apply attention
-        att_3x3 = torch.sigmoid(self.att_3x3(x_3x3))
-        att_5x5 = torch.sigmoid(self.att_5x5(x_5x5))
-        att_7x7 = torch.sigmoid(self.att_7x7(x_7x7))
+        # Independent spatial attention per scale
+        x_3_att = x_3 * torch.sigmoid(self.att_enc_3x3(x_3))
+        x_5_att = x_5 * torch.sigmoid(self.att_enc_5x5(x_5))
+        x_7_att = x_7 * torch.sigmoid(self.att_enc_7x7(x_7))
 
-        x_3x3_att = x_3x3 * att_3x3
-        x_5x5_att = x_5x5 * att_5x5
-        x_7x7_att = x_7x7 * att_7x7
+        p_3_att = p_3 * torch.sigmoid(self.att_ptv_3x3(p_3))
+        p_5_att = p_5 * torch.sigmoid(self.att_ptv_5x5(p_5))
+        p_7_att = p_7 * torch.sigmoid(self.att_ptv_7x7(p_7))
 
-        PTV_3x3_att = PTV_3x3 * att_3x3
-        PTV_5x5_att = PTV_5x5 * att_5x5
-        PTV_7x7_att = PTV_7x7 * att_7x7
+        # Fuse encoder and PTV at each scale, then sum
+        fused = (x_3_att + p_3_att) + (x_5_att + p_5_att) + (x_7_att + p_7_att)
 
-        # Multi-Scale Fusion (Using Addition Instead of Concatenation)
-        fused_features = (x_3x3_att + PTV_3x3_att) + (x_5x5_att + PTV_5x5_att) + (x_7x7_att + PTV_7x7_att)
+        # Final spatial attention over fused representation
+        fused = fused * torch.sigmoid(self.att_fusion(fused))
 
-        # Apply final attention
-        att_fused = torch.sigmoid(self.att_fusion(fused_features))
-        fused_features_att = fused_features * att_fused
-
-        # Final output (single or multi-channel)
-        output = self.final_out(fused_features_att)
-
-        return output
+        return self.final_out(fused)
 
 
 

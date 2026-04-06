@@ -218,9 +218,6 @@ if __name__ == '__main__':
             w_boundary=1.0, w_gradient=0.5)
 
 
-    if hasattr(trainer.setting.loss_function, 'cuda'):
-        trainer.setting.loss_function.cuda()
-
     trainer.setting.online_evaluation_function_val = online_evaluation
 
     trainer.set_optimizer(optimizer_type='Adam',
