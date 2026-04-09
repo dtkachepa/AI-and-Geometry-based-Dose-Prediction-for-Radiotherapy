@@ -337,8 +337,8 @@ class Loss_DC_PTV(nn.Module):
         pred_OAR_combined = pred_A[combined_OAR_mask > 0]  
         gt_OAR_combined = gt_dose[combined_OAR_mask > 0]  
         
-        # L1 loss for the combined OAR region (with learnable weight, matching paper's w_OAR)
-        OAR_Loss = self.OAR_weights.mean() * self.L1_loss_func(pred_OAR_combined, gt_OAR_combined)
+        # L1 loss for the combined OAR region
+        OAR_Loss = self.L1_loss_func(pred_OAR_combined, gt_OAR_combined)
 
         # ---- Total Loss ----
         total_loss = L1_loss + PTV_Loss + OAR_Loss
