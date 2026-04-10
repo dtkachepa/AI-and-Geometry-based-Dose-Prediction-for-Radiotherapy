@@ -43,16 +43,9 @@ class Loss_DC(nn.Module):
 
         
        
-        print("PredA", pred_A.shape)
-        print("gtdose", gt_dose.shape)
-        print("possible_dose_mask", possible_dose_mask.shape)
-        print("PTV:", PTVs.shape)
         # Mask the predicted and ground truth values
         pred_A = pred_A[possible_dose_mask > 0]
         gt_dose = gt_dose[possible_dose_mask > 0]
-
-        print("Masked PredA:", pred_A.shape)
-        print("Masked gt_dose:", gt_dose.shape)
 
         # L1 loss
         L1_loss = self.L1_loss_func(pred_A, gt_dose)
@@ -101,7 +94,6 @@ class AdvancedLoss(nn.Module):
         pred_masked = pred[possible_dose_mask > 0]
         gt_dose_masked = gt_dose[possible_dose_mask > 0]
 
-        print(OAR.shape)
         # L1 Loss
         L1_loss = self.L1_loss_func(pred_masked, gt_dose_masked)
 
@@ -344,17 +336,6 @@ class Loss_DC_PTV(nn.Module):
         total_loss = L1_loss + PTV_Loss + OAR_Loss
         
         # ---- Check if PTV and OAR regions contain non-zero values (i.e., if they exist) ----
-        if torch.any(PTVs > 0):
-            print("PTV region exists (non-zero).")
-        else:
-            print("PTV region is all zeros.")
-        
-        if torch.any(combined_OAR_mask > 0):
-            print("OAR region exists (non-zero).")
-        else:
-            print("OAR region is all zeros.")
-
-
         return total_loss
 
 

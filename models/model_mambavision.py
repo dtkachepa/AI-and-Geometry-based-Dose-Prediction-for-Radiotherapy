@@ -23,8 +23,6 @@ NOTE: encoder/decoder are named `enc`/`dec` (not `encoder`/`decoder`) so
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
-
 from utils.se3d import ChannelSpatialSELayer3D
 
 
@@ -138,12 +136,16 @@ class WindowedSelfAttention3D(nn.Module):
 
 class MambaVisionEncoderBlock(nn.Module):
     """
-    Single conv (3x3x3) for feature extraction, then MambaVision mixer,
-    then CSSE3D. Kept lightweight — multi-scale is handled by the PI module.
+    Conv → optional MambaVision mixer → CSSE3D.
+
+    `use_mixer=False` for shallow (high-resolution) stages — Mamba scanning
+    over 128³/64³ volumes creates tens of thousands of sequences and is the
+    primary cause of slow training. Mixer is only applied at deep stages
+    (32³ and below) where sequence lengths are tractable.
     """
 
     def __init__(self, in_ch: int, out_ch: int, stride: int = 1,
-                 d_state: int = 16):
+                 d_state: int = 16, use_mixer: bool = True):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv3d(in_ch, out_ch, kernel_size=3, stride=stride, padding=1),
@@ -152,12 +154,13 @@ class MambaVisionEncoderBlock(nn.Module):
         )
         self.shortcut = (nn.Conv3d(in_ch, out_ch, 1, stride)
                          if in_ch != out_ch or stride != 1 else None)
-        self.mixer = MambaVision3DMixer(out_ch, d_state)
+        self.mixer = MambaVision3DMixer(out_ch, d_state) if use_mixer else None
         self.csse  = ChannelSpatialSELayer3D(out_ch)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.conv(x)
-        out = self.mixer(out)
+        if self.mixer is not None:
+            out = self.mixer(out)
         out = self.csse(out)
         if self.shortcut is not None:
             out = out + self.shortcut(x)
@@ -270,11 +273,13 @@ class UpConv_MV(nn.Module):
 class _Enc(nn.Module):
     def __init__(self, in_ch: int, list_ch: list, d_state: int = 16):
         super().__init__()
-        self.enc1 = MambaVisionEncoderBlock(in_ch,      list_ch[1], stride=1, d_state=d_state)
-        self.enc2 = MambaVisionEncoderBlock(list_ch[1], list_ch[2], stride=2, d_state=d_state)
-        self.enc3 = MambaVisionEncoderBlock(list_ch[2], list_ch[3], stride=2, d_state=d_state)
-        self.enc4 = MambaVisionEncoderBlock(list_ch[3], list_ch[4], stride=2, d_state=d_state)
-        self.enc5 = MambaVisionEncoderBlock(list_ch[4], list_ch[5], stride=2, d_state=d_state)
+        # Stages 1-3: high resolution (128³→32³) — conv+CSSE only, no Mamba
+        # Stages 4-5: deep (16³, 8³) — full MambaVision mixer applied
+        self.enc1 = MambaVisionEncoderBlock(in_ch,      list_ch[1], stride=1, d_state=d_state, use_mixer=False)
+        self.enc2 = MambaVisionEncoderBlock(list_ch[1], list_ch[2], stride=2, d_state=d_state, use_mixer=False)
+        self.enc3 = MambaVisionEncoderBlock(list_ch[2], list_ch[3], stride=2, d_state=d_state, use_mixer=False)
+        self.enc4 = MambaVisionEncoderBlock(list_ch[3], list_ch[4], stride=2, d_state=d_state, use_mixer=True)
+        self.enc5 = MambaVisionEncoderBlock(list_ch[4], list_ch[5], stride=2, d_state=d_state, use_mixer=True)
 
         # PI from stage 2 onward
         self.comb2 = Comb_MV(list_ch[1], list_ch[1])
@@ -284,10 +289,8 @@ class _Enc(nn.Module):
 
     def forward(self, x: torch.Tensor):
         ptv = x[:, 0:1]
-        # Checkpoint the first two encoder stages — they run at the highest
-        # spatial resolutions (128³ and 64³) where activations are largest.
-        e1 = checkpoint(self.enc1, x, use_reentrant=False)
-        e2 = checkpoint(self.enc2, checkpoint(self.comb2, e1, ptv, use_reentrant=False), use_reentrant=False)
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.comb2(e1, ptv))
         e3 = self.enc3(self.comb3(e2, ptv))
         e4 = self.enc4(self.comb4(e3, ptv))
         e5 = self.enc5(self.comb5(e4, ptv))
@@ -329,8 +332,8 @@ class _Dec(nn.Module):
         e1, e2, e3, e4, e5 = enc_feats
         d4 = self.dec4(self.af4(self.up4(e5), e4))
         d3 = self.dec3(self.af3(self.up3(d4), e3))
-        d2 = checkpoint(self.dec2, self.af2(self.up2(d3), e2), use_reentrant=False)
-        d1 = checkpoint(self.dec1, self.af1(self.up1(d2), e1), use_reentrant=False)
+        d2 = self.dec2(self.af2(self.up2(d3), e2))
+        d1 = self.dec1(self.af1(self.up1(d2), e1))
         return d1
 
 
