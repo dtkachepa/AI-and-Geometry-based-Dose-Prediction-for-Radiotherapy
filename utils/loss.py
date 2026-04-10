@@ -342,13 +342,6 @@ class Loss_DC_PTV(nn.Module):
 
         # ---- Total Loss ----
         total_loss = L1_loss + PTV_Loss + OAR_Loss
-
-
-        # ---- Check if PTV and Combined OAR masks are identical ----
-        if torch.equal(combined_OAR_mask, PTVs):
-            print("PTV and OAR masks are identical.")
-        else:
-            print("PTV and OAR masks are NOT identical.")
         
         # ---- Check if PTV and OAR regions contain non-zero values (i.e., if they exist) ----
         if torch.any(PTVs > 0):
@@ -447,7 +440,7 @@ class Loss_BoundaryAware(nn.Module):
         Returns a boolean mask of the same shape as ptv.
         """
         # Erosion via convolution: a voxel survives iff all sphere positions = 1
-        eroded = F.conv3d(ptv.float(), self.sphere_kernel, padding=self.k)
+        eroded = F.conv3d(ptv.float(), self.sphere_kernel.to(ptv.device), padding=self.k)
         eroded = (eroded >= self.sphere_sum - 0.5).float()
         return (ptv.float() - eroded) > 0.5
 
@@ -457,16 +450,22 @@ class Loss_BoundaryAware(nn.Module):
         Returns a boolean mask of the same shape as ptv.
         """
         m = ptv.float()
-        gx = F.conv3d(m, self.Gx, padding=1)
-        gy = F.conv3d(m, self.Gy, padding=1)
-        gz = F.conv3d(m, self.Gz, padding=1)
+        Gx = self.Gx.to(m.device)
+        Gy = self.Gy.to(m.device)
+        Gz = self.Gz.to(m.device)
+        gx = F.conv3d(m, Gx, padding=1)
+        gy = F.conv3d(m, Gy, padding=1)
+        gz = F.conv3d(m, Gz, padding=1)
         return (gx ** 2 + gy ** 2 + gz ** 2) > 0
 
     def _sobel_gradients(self, vol: torch.Tensor):
         """Return (gx, gy, gz) Sobel gradients of a dose volume."""
-        gx = F.conv3d(vol, self.Gx, padding=1)
-        gy = F.conv3d(vol, self.Gy, padding=1)
-        gz = F.conv3d(vol, self.Gz, padding=1)
+        Gx = self.Gx.to(vol.device)
+        Gy = self.Gy.to(vol.device)
+        Gz = self.Gz.to(vol.device)
+        gx = F.conv3d(vol, Gx, padding=1)
+        gy = F.conv3d(vol, Gy, padding=1)
+        gz = F.conv3d(vol, Gz, padding=1)
         return gx, gy, gz
 
     # ── Forward ───────────────────────────────────────────────────────────
