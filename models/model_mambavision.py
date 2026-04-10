@@ -23,6 +23,7 @@ NOTE: encoder/decoder are named `enc`/`dec` (not `encoder`/`decoder`) so
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from utils.se3d import ChannelSpatialSELayer3D
 
@@ -283,8 +284,10 @@ class _Enc(nn.Module):
 
     def forward(self, x: torch.Tensor):
         ptv = x[:, 0:1]
-        e1 = self.enc1(x)
-        e2 = self.enc2(self.comb2(e1, ptv))
+        # Checkpoint the first two encoder stages — they run at the highest
+        # spatial resolutions (128³ and 64³) where activations are largest.
+        e1 = checkpoint(self.enc1, x, use_reentrant=False)
+        e2 = checkpoint(self.enc2, checkpoint(self.comb2, e1, ptv, use_reentrant=False), use_reentrant=False)
         e3 = self.enc3(self.comb3(e2, ptv))
         e4 = self.enc4(self.comb4(e3, ptv))
         e5 = self.enc5(self.comb5(e4, ptv))
