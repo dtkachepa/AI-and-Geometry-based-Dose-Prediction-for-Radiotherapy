@@ -317,20 +317,20 @@ class _Dec(nn.Module):
                                             use_attention=False)
         self.dec3 = MambaVisionDecoderBlock(list_ch[3], d_state=d_state,
                                             use_attention=False)
-        # Final stages → self-attention (MambaVision last N/2 pattern)
+        # dec2 at 64³ resolution → windowed self-attention (4³ windows → ~537 MB)
         self.dec2 = MambaVisionDecoderBlock(list_ch[2], d_state=d_state,
                                             use_attention=True,
                                             num_heads=4, window_size=4)
+        # dec1 at 128³ resolution → MambaVision mixer (attention would be ~34 GB)
         self.dec1 = MambaVisionDecoderBlock(list_ch[1], d_state=d_state,
-                                            use_attention=True,
-                                            num_heads=4, window_size=8)
+                                            use_attention=False)
 
     def forward(self, enc_feats):
         e1, e2, e3, e4, e5 = enc_feats
         d4 = self.dec4(self.af4(self.up4(e5), e4))
         d3 = self.dec3(self.af3(self.up3(d4), e3))
-        d2 = self.dec2(self.af2(self.up2(d3), e2))
-        d1 = self.dec1(self.af1(self.up1(d2), e1))
+        d2 = checkpoint(self.dec2, self.af2(self.up2(d3), e2), use_reentrant=False)
+        d1 = checkpoint(self.dec1, self.af1(self.up1(d2), e1), use_reentrant=False)
         return d1
 
 
