@@ -179,7 +179,7 @@ class MambaVisionDecoderBlock(nn.Module):
     """
 
     def __init__(self, channels: int, d_state: int = 16,
-                 use_attention: bool = False,
+                 use_attention: bool = False, use_mixer: bool = True,
                  num_heads: int = 4, window_size: int = 4):
         super().__init__()
         self.conv = nn.Sequential(
@@ -190,14 +190,17 @@ class MambaVisionDecoderBlock(nn.Module):
         if use_attention:
             self.token_mixer = WindowedSelfAttention3D(
                 channels, num_heads=num_heads, window_size=window_size)
-        else:
+        elif use_mixer:
             self.token_mixer = MambaVision3DMixer(channels, d_state)
+        else:
+            self.token_mixer = None
 
         self.csse = ChannelSpatialSELayer3D(channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.conv(x)
-        out = self.token_mixer(out)
+        if self.token_mixer is not None:
+            out = self.token_mixer(out)
         return self.csse(out)
 
 
@@ -315,18 +318,18 @@ class _Dec(nn.Module):
         self.af2 = AddFeatureMaps_MV(list_ch[2])
         self.af1 = AddFeatureMaps_MV(list_ch[1])
 
-        # Deep stages → MambaVision mixer
+        # dec4 (16³) and dec3 (32³) → MambaVision mixer (sequence length tractable)
         self.dec4 = MambaVisionDecoderBlock(list_ch[4], d_state=d_state,
-                                            use_attention=False)
+                                            use_attention=False, use_mixer=True)
         self.dec3 = MambaVisionDecoderBlock(list_ch[3], d_state=d_state,
-                                            use_attention=False)
-        # dec2 at 64³ resolution → windowed self-attention (4³ windows → ~537 MB)
+                                            use_attention=False, use_mixer=True)
+        # dec2 (64³) → windowed self-attention with small windows
         self.dec2 = MambaVisionDecoderBlock(list_ch[2], d_state=d_state,
                                             use_attention=True,
                                             num_heads=4, window_size=4)
-        # dec1 at 128³ resolution → MambaVision mixer (attention would be ~34 GB)
+        # dec1 (128³) → conv+CSSE only; Mamba at 128³ is as slow as enc1 was
         self.dec1 = MambaVisionDecoderBlock(list_ch[1], d_state=d_state,
-                                            use_attention=False)
+                                            use_attention=False, use_mixer=False)
 
     def forward(self, enc_feats):
         e1, e2, e3, e4, e5 = enc_feats
