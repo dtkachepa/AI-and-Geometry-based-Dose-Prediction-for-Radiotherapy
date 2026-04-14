@@ -725,7 +725,7 @@ class NetworkTrainer:
 
 
 def online_evaluation(trainer):
-    list_patient_dirs = ['OpenKBP_C3D/pt_' + str(i) for i in range(241,341)]
+    list_patient_dirs = ['OpenKBP_C3D/pt_' + str(i) for i in range(201, 241)]
 
     list_Dose_score = []
 
