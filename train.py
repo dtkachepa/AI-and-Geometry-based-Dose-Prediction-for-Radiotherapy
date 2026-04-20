@@ -224,6 +224,9 @@ if __name__ == '__main__':
         trainer.setting.loss_function = Loss_BoundaryAware(
             boundary_method='grad', boundary_thickness=2,
             w_boundary=1.0, w_gradient=0.5)
+    elif args.loss == 'Loss_AsymmetricPenumbra':
+        trainer.setting.loss_function = Loss_AsymmetricPenumbra(
+            n_steps=3, sigma=1.5, w_sdw_init=0.5, w_ext_init=1.0, w_cov_init=0.5)
 
 
     trainer.setting.online_evaluation_function_val = online_evaluation
