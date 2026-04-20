@@ -529,7 +529,8 @@ class Loss_AsymmetricPenumbra(nn.Module):
         self.register_buffer('erosion_kernel', torch.ones(1, 1, 3, 3, 3))
 
     def _erode(self, mask: torch.Tensor) -> torch.Tensor:
-        conv = F.conv3d(mask, self.erosion_kernel, padding=1)
+        kernel = self.erosion_kernel.to(mask.device)
+        conv = F.conv3d(mask, kernel, padding=1)
         return (conv >= 27.0 - 1e-3).float()
 
     def _dilate(self, mask: torch.Tensor) -> torch.Tensor:
