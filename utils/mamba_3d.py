@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 
 class TriDirectionalMamba(nn.Module):
@@ -42,6 +43,24 @@ class TriDirectionalMamba(nn.Module):
         # Learnable fusion weights α1, α2, α3 (initialised equally)
         self.alpha = nn.Parameter(torch.ones(3))
 
+    def _scan_z(self, x: Tensor) -> Tensor:
+        B, C, D, H, W = x.shape
+        x_z = x.permute(0, 3, 4, 2, 1).contiguous().reshape(B * H * W, D, C)
+        x_z = self.mamba_z(self.norm_z(x_z))
+        return x_z.reshape(B, H, W, D, C).permute(0, 4, 3, 1, 2).contiguous()
+
+    def _scan_y(self, x: Tensor) -> Tensor:
+        B, C, D, H, W = x.shape
+        x_y = x.permute(0, 2, 4, 3, 1).contiguous().reshape(B * D * W, H, C)
+        x_y = self.mamba_y(self.norm_y(x_y))
+        return x_y.reshape(B, D, W, H, C).permute(0, 4, 1, 3, 2).contiguous()
+
+    def _scan_x(self, x: Tensor) -> Tensor:
+        B, C, D, H, W = x.shape
+        x_x = x.permute(0, 2, 3, 4, 1).contiguous().reshape(B * D * H, W, C)
+        x_x = self.mamba_x(self.norm_x(x_x))
+        return x_x.reshape(B, D, H, W, C).permute(0, 4, 1, 2, 3).contiguous()
+
     def forward(self, x: Tensor) -> Tensor:
         """
         Args:
@@ -50,32 +69,11 @@ class TriDirectionalMamba(nn.Module):
         Returns:
             (B, C, D, H, W) — same shape, long-range context captured
         """
-        B, C, D, H, W = x.shape
+        # Gradient checkpointing: recompute activations during backward
+        # instead of storing them, trading compute for memory.
+        x_z = checkpoint(self._scan_z, x, use_reentrant=False)
+        x_y = checkpoint(self._scan_y, x, use_reentrant=False)
+        x_x = checkpoint(self._scan_x, x, use_reentrant=False)
 
-        # ── Axial scan (z-axis) ─────────────────────────────────────────────
-        # For each (h, w) pixel, form a length-D sequence along depth.
-        # (B, C, D, H, W) → (B, H, W, D, C) → (B*H*W, D, C)
-        x_z = x.permute(0, 3, 4, 2, 1).contiguous().reshape(B * H * W, D, C)
-        x_z = self.mamba_z(self.norm_z(x_z))
-        # (B*H*W, D, C) → (B, H, W, D, C) → (B, C, D, H, W)
-        x_z = x_z.reshape(B, H, W, D, C).permute(0, 4, 3, 1, 2).contiguous()
-
-        # ── Coronal scan (y-axis) ───────────────────────────────────────────
-        # For each (d, w) pixel, form a length-H sequence along height.
-        # (B, C, D, H, W) → (B, D, W, H, C) → (B*D*W, H, C)
-        x_y = x.permute(0, 2, 4, 3, 1).contiguous().reshape(B * D * W, H, C)
-        x_y = self.mamba_y(self.norm_y(x_y))
-        # (B*D*W, H, C) → (B, D, W, H, C) → (B, C, D, H, W)
-        x_y = x_y.reshape(B, D, W, H, C).permute(0, 4, 1, 3, 2).contiguous()
-
-        # ── Sagittal scan (x-axis) ──────────────────────────────────────────
-        # For each (d, h) pixel, form a length-W sequence along width.
-        # (B, C, D, H, W) → (B, D, H, W, C) → (B*D*H, W, C)
-        x_x = x.permute(0, 2, 3, 4, 1).contiguous().reshape(B * D * H, W, C)
-        x_x = self.mamba_x(self.norm_x(x_x))
-        # (B*D*H, W, C) → (B, D, H, W, C) → (B, C, D, H, W)
-        x_x = x_x.reshape(B, D, H, W, C).permute(0, 4, 1, 2, 3).contiguous()
-
-        # ── Weighted fusion (eq. 10) ────────────────────────────────────────
         weights = torch.softmax(self.alpha, dim=0)
         return weights[0] * x_z + weights[1] * x_y + weights[2] * x_x

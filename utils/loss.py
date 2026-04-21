@@ -43,16 +43,9 @@ class Loss_DC(nn.Module):
 
         
        
-        print("PredA", pred_A.shape)
-        print("gtdose", gt_dose.shape)
-        print("possible_dose_mask", possible_dose_mask.shape)
-        print("PTV:", PTVs.shape)
         # Mask the predicted and ground truth values
         pred_A = pred_A[possible_dose_mask > 0]
         gt_dose = gt_dose[possible_dose_mask > 0]
-
-        print("Masked PredA:", pred_A.shape)
-        print("Masked gt_dose:", gt_dose.shape)
 
         # L1 loss
         L1_loss = self.L1_loss_func(pred_A, gt_dose)
@@ -101,7 +94,6 @@ class AdvancedLoss(nn.Module):
         pred_masked = pred[possible_dose_mask > 0]
         gt_dose_masked = gt_dose[possible_dose_mask > 0]
 
-        print(OAR.shape)
         # L1 Loss
         L1_loss = self.L1_loss_func(pred_masked, gt_dose_masked)
 
@@ -344,17 +336,6 @@ class Loss_DC_PTV(nn.Module):
         total_loss = L1_loss + PTV_Loss + OAR_Loss
         
         # ---- Check if PTV and OAR regions contain non-zero values (i.e., if they exist) ----
-        if torch.any(PTVs > 0):
-            print("PTV region exists (non-zero).")
-        else:
-            print("PTV region is all zeros.")
-        
-        if torch.any(combined_OAR_mask > 0):
-            print("OAR region exists (non-zero).")
-        else:
-            print("OAR region is all zeros.")
-
-
         return total_loss
 
 
@@ -511,4 +492,118 @@ class Loss_BoundaryAware(nn.Module):
 
         # ── Total (eq. 7) ─────────────────────────────────────────────────
         total = L1_loss + L_ptv + L_oar + L_boundary + L_gradient
+        return total
+
+
+class Loss_AsymmetricPenumbra(nn.Module):
+    """
+    Asymmetric penumbra loss that directly targets the dose-bleeding failure mode.
+
+    L_Total = L_base + |w_sdw|·L_distweighted + |w_ext|·L_exterior + |w_cov|·L_coverage
+
+    L_base        : L1_mask + w_PTV·L_PTV + w_OAR·L_OAR  (same as Loss_DC_PTV)
+    L_distweighted: continuous exp-decay weighted L1, centred on PTV surface
+    L_exterior    : relu(pred - gt) outside PTV — penalises over-dose bleeding
+    L_coverage    : relu(gt - pred) inside PTV  — penalises under-coverage cold spots
+    """
+
+    def __init__(self,
+                 n_steps: int = 3,
+                 sigma: float = 1.5,
+                 w_sdw_init: float = 0.5,
+                 w_ext_init: float = 1.0,
+                 w_cov_init: float = 0.5):
+        super().__init__()
+        self.n_steps = n_steps
+        self.sigma = sigma
+
+        self.PTV_weight = nn.Parameter(torch.tensor(1.0))
+        self.OAR_weight = nn.Parameter(torch.tensor(1.0))
+        self.w_sdw = nn.Parameter(torch.tensor(w_sdw_init))
+        self.w_ext = nn.Parameter(torch.tensor(w_ext_init))
+        self.w_cov = nn.Parameter(torch.tensor(w_cov_init))
+
+        self.L1 = nn.L1Loss(reduction='mean')
+
+        # 3x3x3 all-ones kernel for morphological erosion
+        self.register_buffer('erosion_kernel', torch.ones(1, 1, 3, 3, 3))
+
+    def _erode(self, mask: torch.Tensor) -> torch.Tensor:
+        kernel = self.erosion_kernel.to(mask.device)
+        conv = F.conv3d(mask, kernel, padding=1)
+        return (conv >= 27.0 - 1e-3).float()
+
+    def _dilate(self, mask: torch.Tensor) -> torch.Tensor:
+        return (F.max_pool3d(mask, kernel_size=3, stride=1, padding=1) > 0.5).float()
+
+    def _build_distance_weight_map(self, ptv_binary: torch.Tensor) -> torch.Tensor:
+        # Initialise all voxels to far distance; override as bands are found
+        d_map = torch.full_like(ptv_binary, float(self.n_steps + 1))
+
+        # Interior bands via iterative erosion
+        prev = ptv_binary
+        for k in range(self.n_steps + 1):
+            curr = self._erode(prev)
+            band = (prev - curr).clamp(min=0)  # ring peeled off at step k
+            d_map = torch.where(band > 0.5, torch.full_like(d_map, float(k)), d_map)
+            prev = curr
+            if not curr.any():
+                break
+
+        # Exterior bands via iterative dilation
+        prev = ptv_binary
+        for k in range(1, self.n_steps + 1):
+            curr = self._dilate(prev)
+            band = (curr - prev).clamp(min=0)  # new ring added outside
+            d_map = torch.where(band > 0.5, torch.full_like(d_map, float(k)), d_map)
+            prev = curr
+
+        return torch.exp(-d_map / self.sigma)
+
+    def forward(self, pred, gt, PTVs, OAR):
+        device = pred.device
+        gt_dose = gt[0].to(device)
+        possible_dose_mask = gt[1].to(device)
+        PTVs = PTVs.to(device)
+        OAR = OAR.to(device)
+
+        # ── L_base (mirrors Loss_DC_PTV) ─────────────────────────────────
+        pred_m = pred[possible_dose_mask > 0]
+        gt_m   = gt_dose[possible_dose_mask > 0]
+        L1_loss = self.L1(pred_m, gt_m)
+
+        ptv_mask = PTVs > 0
+        L_ptv = (self.PTV_weight * self.L1(pred[ptv_mask], gt_dose[ptv_mask])
+                 if ptv_mask.any() else pred.new_tensor(0.0))
+
+        oar_mask = OAR.sum(dim=1, keepdim=True) > 0
+        L_oar = (self.OAR_weight * self.L1(pred[oar_mask], gt_dose[oar_mask])
+                 if oar_mask.any() else pred.new_tensor(0.0))
+
+        L_base = L1_loss + L_ptv + L_oar
+
+        # ── L_distweighted: exponential-decay surface-centred L1 ─────────
+        ptv_binary = (PTVs > 0).float()
+        w_dist = self._build_distance_weight_map(ptv_binary)
+        dose_float = (possible_dose_mask > 0).float()
+        n_vox = dose_float.sum().clamp(min=1)
+        L_distweighted = (w_dist * torch.abs(pred - gt_dose) * dose_float).sum() / n_vox
+
+        # ── L_exterior: asymmetric over-dose penalty outside PTV ─────────
+        outside_mask = (possible_dose_mask > 0) & ~ptv_mask
+        if outside_mask.any():
+            L_exterior = F.relu(pred[outside_mask] - gt_dose[outside_mask]).mean()
+        else:
+            L_exterior = pred.new_tensor(0.0)
+
+        # ── L_coverage: asymmetric under-dose penalty inside PTV ─────────
+        if ptv_mask.any():
+            L_coverage = F.relu(gt_dose[ptv_mask] - pred[ptv_mask]).mean()
+        else:
+            L_coverage = pred.new_tensor(0.0)
+
+        total = (L_base
+                 + self.w_sdw.abs() * L_distweighted
+                 + self.w_ext.abs() * L_exterior
+                 + self.w_cov.abs() * L_coverage)
         return total

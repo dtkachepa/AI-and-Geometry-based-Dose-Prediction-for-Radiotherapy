@@ -199,7 +199,8 @@ def read_data(patient_dir):
             # To numpy array (C * Z * H * W)
             dict_images[structure_name] = sitk.GetArrayFromImage(dict_images[structure_name])[np.newaxis, :, :, :]
         else:
-            dict_images[structure_name] = np.zeros((1, 128, 128, 128), np.uint8)
+            fallback_dtype = np.int16 if structure_name == 'CT' else (np.float32 if structure_name == 'dose' else np.uint8)
+            dict_images[structure_name] = np.zeros((1, 128, 128, 128), fallback_dtype)
 
     return dict_images
 
@@ -725,7 +726,7 @@ class NetworkTrainer:
 
 
 def online_evaluation(trainer):
-    list_patient_dirs = ['OpenKBP_C3D/pt_' + str(i) for i in range(241,341)]
+    list_patient_dirs = ['OpenKBP_C3D/pt_' + str(i) for i in range(201, 241)]
 
     list_Dose_score = []
 
