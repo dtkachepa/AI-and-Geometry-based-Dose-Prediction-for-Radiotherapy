@@ -199,7 +199,8 @@ def read_data(patient_dir):
             # To numpy array (C * Z * H * W)
             dict_images[structure_name] = sitk.GetArrayFromImage(dict_images[structure_name])[np.newaxis, :, :, :]
         else:
-            dict_images[structure_name] = np.zeros((1, 128, 128, 128), np.uint8)
+            fallback_dtype = np.int16 if structure_name == 'CT' else (np.float32 if structure_name == 'dose' else np.uint8)
+            dict_images[structure_name] = np.zeros((1, 128, 128, 128), fallback_dtype)
 
     return dict_images
 

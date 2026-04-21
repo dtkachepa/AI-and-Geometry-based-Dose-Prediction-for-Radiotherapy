@@ -561,8 +561,11 @@ class Loss_AsymmetricPenumbra(nn.Module):
         return torch.exp(-d_map / self.sigma)
 
     def forward(self, pred, gt, PTVs, OAR):
-        gt_dose = gt[0]
-        possible_dose_mask = gt[1]
+        device = pred.device
+        gt_dose = gt[0].to(device)
+        possible_dose_mask = gt[1].to(device)
+        PTVs = PTVs.to(device)
+        OAR = OAR.to(device)
 
         # ── L_base (mirrors Loss_DC_PTV) ─────────────────────────────────
         pred_m = pred[possible_dose_mask > 0]
@@ -581,7 +584,7 @@ class Loss_AsymmetricPenumbra(nn.Module):
 
         # ── L_distweighted: exponential-decay surface-centred L1 ─────────
         ptv_binary = (PTVs > 0).float()
-        w_dist = self._build_distance_weight_map(ptv_binary)   # [B,1,D,H,W]
+        w_dist = self._build_distance_weight_map(ptv_binary)
         dose_float = (possible_dose_mask > 0).float()
         n_vox = dose_float.sum().clamp(min=1)
         L_distweighted = (w_dist * torch.abs(pred - gt_dose) * dose_float).sum() / n_vox
